@@ -15,7 +15,7 @@ from services.ssh_service import SSHService, run_ios_commands, reset_interface_a
 
 class AgentDataLinkService:
     def _get_runtime(self):
-        ate_switches, _, dl_switch, _, env_state = load_all_config()
+        ate_switches, _, dl_switch, _, env_state ,_ ,_= load_all_config()
         dl_info = get_single_section(dl_switch, "DL_SWITCH")
         if not dl_info:
             return ate_switches, {}, env_state, [], {}, {}
@@ -47,7 +47,7 @@ class AgentDataLinkService:
         return ate_switches, dl_info, env_state, plane_dl_ports, interface_desc_map, parsed_run
 
     def _build_dry_run_rows_from_config(self):
-        _, _, dl_switch, _, env_state = load_all_config()
+        _, _, dl_switch, _, env_state ,_ ,_= load_all_config()
         dl_info = get_single_section(dl_switch, "DL_SWITCH")
         plane_dl_ports = [p.strip() for p in dl_info.get("dl_ports", "").split(",") if p.strip()] if dl_info else []
         env_names = get_env_names(env_state)
@@ -112,7 +112,7 @@ class AgentDataLinkService:
 
     def get_options(self):
         rows = self.get_rows()
-        _, _, _, _, env_state = load_all_config()
+        _, _, _, _, env_state ,_ ,_= load_all_config()
         envs = get_env_names(env_state)
         state_map = {env: get_env_state_by_name(env_state, env) for env in envs}
         return {
@@ -122,7 +122,7 @@ class AgentDataLinkService:
         }
 
     def get_maintenance_by_plane(self, plane_description: str) -> str:
-        _, kms_switch, _, kms_stations, _ = load_all_config()
+        _, kms_switch, _, kms_stations, _ ,_ ,_= load_all_config()
         kms_info = get_single_section(kms_switch, "KMS_SWITCH")
         if not kms_info:
             return "Dry Run"
@@ -156,7 +156,7 @@ class AgentDataLinkService:
         }
 
     def get_ate_state_by_plane(self, plane_description: str) -> str:
-        ate_switches, _, _, _, env_state = load_all_config()
+        ate_switches, _, _, _, env_state ,_ ,_= load_all_config()
         ate_station = get_ate_station_for_plane(ate_switches, plane_description)
 
         if ate_station is None:

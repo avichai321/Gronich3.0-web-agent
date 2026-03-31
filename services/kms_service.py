@@ -6,7 +6,7 @@ from services.ssh_service import SSHService, run_ios_commands
 
 class AgentKmsService:
     def _get_runtime(self):
-        _, kms_switch, _, kms_stations, _ = load_all_config()
+        _, kms_switch, _, kms_stations, _ ,_ ,_= load_all_config()
         kms_info = get_single_section(kms_switch, "KMS_SWITCH")
         if not kms_info:
             return {}, {}, [], {}, []
@@ -49,7 +49,7 @@ class AgentKmsService:
         return kms_info, int_kms_dec, plane_ports, vlan_to_station, rows
 
     def _build_dry_run_rows_from_config(self):
-        _, kms_switch, _, kms_stations, _ = load_all_config()
+        _, kms_switch, _, kms_stations, _ ,_ ,_= load_all_config()
         kms_info = get_single_section(kms_switch, "KMS_SWITCH")
         plane_ports = [p.strip() for p in kms_info.get("kms_ports", "").split(",") if p.strip()] if kms_info else []
         vlan_to_station = build_vlan_to_kms_map(kms_stations)
