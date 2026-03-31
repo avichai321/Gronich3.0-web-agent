@@ -50,7 +50,9 @@ class DashboardPage(QWidget):
         self.server_card = InfoCard("Server URL", "-")
         self.kms_card = InfoCard("KMS Connected", "0")
         self.dl_card = InfoCard("DL Active", "0")
-
+        self.tod_card = InfoCard("TOD-SIL", "-")
+        
+        top_row.addWidget(self.tod_card)
         top_row.addWidget(self.mode_card)
         top_row.addWidget(self.server_card)
         top_row.addWidget(self.kms_card)
@@ -94,6 +96,7 @@ class DashboardPage(QWidget):
 
         kms_rows = self.kms_service.get_rows()
         dl_rows = self.dl_service.get_rows()
+        tod_status = self.dl_service.get_tod_status()
 
         kms_connected = sum(1 for row in kms_rows if row.get("status") == "connected")
         dl_active = sum(1 for row in dl_rows if row.get("environment") != "Free to connect")
@@ -102,6 +105,7 @@ class DashboardPage(QWidget):
         self.server_card.set_value(server_url)
         self.kms_card.set_value(str(kms_connected))
         self.dl_card.set_value(str(dl_active))
+        self.tod_card.set_value(tod_status.get("env", "-"))
 
         self.status_label.setText(
             f"Keys Dir: {general.get('keys_dir', '')} | Bridge Export: {general.get('bridge_export_path', '')}"
