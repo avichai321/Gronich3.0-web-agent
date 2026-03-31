@@ -1,0 +1,96 @@
+
+---
+
+# `.gitignore`
+
+```gitignore
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+config/agent.ini
+config/local_runtime.ini
+*.enc
+
+# =========================
+# Keys / certificates
+# =========================
+keys/
+*.pem
+*.key
+*.ppk
+*.crt
+*.pfx
+
+# =========================
+# Runtime / temporary outputs
+# =========================
+tmp/
+temp/
+downloads/
+exports/
+*.zip
+*.tar
+*.tar.gz
+
+# =========================
+# Qt / PySide
+# =========================
+*.qmlc
+*.jsc
+*.rcc
+
+# =========================
+# Databases / caches
+# =========================
+*.sqlite3
+*.db
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Local artifacts
+# =========================
+*.bak
+*.tmp
