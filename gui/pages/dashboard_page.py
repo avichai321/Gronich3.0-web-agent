@@ -1,12 +1,13 @@
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QThread
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QPushButton
 
 from core.app_state import app_state
 from core.config_manager import load_agent_config, load_general_settings
 from services.kms_service import AgentKmsService
 from services.datalink_service import AgentDataLinkService
-from services.server_sync_service import AgentServerSyncService
 from services.tod_service import AgentTodService
+from services.server_sync_service import AgentServerSyncService
+from gui.workers import DashboardWorker
 
 
 class InfoCard(QFrame):
@@ -36,8 +37,9 @@ class DashboardPage(QWidget):
 
         self.kms_service = AgentKmsService()
         self.dl_service = AgentDataLinkService()
-        self.server_sync = AgentServerSyncService()
         self.tod_service = AgentTodService()
+        self.server_sync = AgentServerSyncService()
+        self._busy = False
 
         root = QVBoxLayout(self)
 
@@ -53,12 +55,12 @@ class DashboardPage(QWidget):
         self.kms_card = InfoCard("KMS Connected", "0")
         self.dl_card = InfoCard("DL Active", "0")
         self.tod_card = InfoCard("TOD-SIL", "-")
-        
-        top_row.addWidget(self.tod_card)
+
         top_row.addWidget(self.mode_card)
         top_row.addWidget(self.server_card)
         top_row.addWidget(self.kms_card)
         top_row.addWidget(self.dl_card)
+        top_row.addWidget(self.tod_card)
 
         sync_row = QHBoxLayout()
         root.addLayout(sync_row)
@@ -84,46 +86,69 @@ class DashboardPage(QWidget):
         self.heartbeat_btn.clicked.connect(self.handle_heartbeat)
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh_data)
+        self.timer.timeout.connect(self.refresh_data_async)
         self.timer.start(15000)
 
-        self.refresh_data()
+        QTimer.singleShot(300, self.refresh_data_async)
 
-    def refresh_data(self):
-        cfg = load_agent_config()
-        general = load_general_settings()
+    def refresh_data_async(self):
+        if self._busy:
+            return
+        self._busy = True
 
-        mode = app_state.current_mode
-        server_url = cfg.get("server", "url", fallback="-")
+        self.thread = QThread()
+        self.worker = DashboardWorker(
+            self.kms_service,
+            self.dl_service,
+            self.tod_service,
+            self.server_sync,
+            load_agent_config,
+            load_general_settings,
+            app_state,
+        )
+        self.worker.moveToThread(self.thread)
 
-        kms_rows = self.kms_service.get_rows()
-        dl_rows = self.dl_service.get_rows()
-        tod_status = self.tod_service.get_status()
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._apply_data)
+        self.worker.error.connect(self._on_error)
 
-        kms_connected = sum(1 for row in kms_rows if row.get("status") == "connected")
-        dl_active = sum(1 for row in dl_rows if row.get("environment") != "Free to connect")
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.error.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
 
-        self.mode_card.set_value(mode)
-        self.server_card.set_value(server_url)
-        self.kms_card.set_value(str(kms_connected))
-        self.dl_card.set_value(str(dl_active))
-        self.tod_card.set_value(tod_status.get("env", "-"))
+        self.thread.start()
+
+    def _apply_data(self, data: dict):
+        self._busy = False
+
+        self.mode_card.set_value(data["mode"])
+        self.server_card.set_value(data["server_url"])
+        self.kms_card.set_value(str(data["kms_connected"]))
+        self.dl_card.set_value(str(data["dl_active"]))
+        self.tod_card.set_value(data["tod_env"])
 
         self.status_label.setText(
-            f"Keys Dir: {general.get('keys_dir', '')} | Bridge Export: {general.get('bridge_export_path', '')}"
+            f"Keys Dir: {data['keys_dir']} | Bridge Export: {data['bridge_export_path']}"
         )
 
         self.details_label.setText(
-            f"Server Online: {app_state.server_online} | "
-            f"Last Register: {app_state.last_register} | "
-            f"Last Heartbeat: {app_state.last_heartbeat} | "
-            f"Last Error: {app_state.last_error or '-'}"
+            f"Server Online: {data['server_online']} | "
+            f"Last Register: {data['last_register']} | "
+            f"Last Heartbeat: {data['last_heartbeat']} | "
+            f"Last Error: {data['last_error']} | "
+            f"TOD Status: {data['tod_status']}"
         )
+
+    def _on_error(self, message: str):
+        self._busy = False
+        self.details_label.setText(f"Dashboard error: {message}")
 
     def handle_register(self):
         self.server_sync.register()
-        self.refresh_data()
+        self.refresh_data_async()
 
     def handle_heartbeat(self):
         self.server_sync.heartbeat()
-        self.refresh_data()
+        self.refresh_data_async()

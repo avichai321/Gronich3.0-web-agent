@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QThread
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -20,12 +20,21 @@ from gui.pages.dashboard_page import DashboardPage
 from gui.pages.file_copy_page import FileCopyPage
 from gui.pages.kms_page import KmsPage
 from gui.pages.datalink_page import DataLinkPage
+from gui.pages.tod_page import TodPage
 from gui.pages.logs_page import LogsPage
 from gui.theme import DARK_STYLE
+from gui.workers import ServerStatusWorker, JobPollWorker
 from services.server_sync_service import AgentServerSyncService
-from gui.pages.tod_page import TodPage
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+
+def get_base_path() -> Path:
+    import sys
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+BASE_DIR = get_base_path()
 LOGO_PATH = BASE_DIR / "assets" / "logo.png"
 
 
@@ -34,6 +43,8 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.server_sync = AgentServerSyncService()
+        self._status_busy = False
+        self._job_busy = False
 
         self.setWindowTitle("Gronich Agent")
         self.resize(1450, 900)
@@ -59,18 +70,15 @@ class MainWindow(QMainWindow):
         body.addWidget(content, 5)
 
         self.status_timer = QTimer(self)
-        self.status_timer.timeout.connect(self.refresh_server_status)
+        self.status_timer.timeout.connect(self.refresh_server_status_async)
         self.status_timer.start(10000)
 
-        self.refresh_server_status()
-
         self.job_timer = QTimer(self)
-        self.job_timer.timeout.connect(self.run_job_poll)
+        self.job_timer.timeout.connect(self.run_job_poll_async)
         self.job_timer.start(5000)
-    
-    def run_job_poll(self):
-        self.server_sync.execute_pending_job()
-    
+
+        self.refresh_server_status_async()
+
     def _build_header(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("HeaderFrame")
@@ -95,11 +103,21 @@ class MainWindow(QMainWindow):
         title = QLabel("Gronich Agent")
         title.setObjectName("TitleLabel")
 
-        subtitle = QLabel("Local control console for File Copy, KMS and Data-Link")
+        subtitle = QLabel("Local control console for File Copy, KMS, Data-Link and TOD-SIL")
         subtitle.setObjectName("SubTitleLabel")
+
+        self.agent_info = QLabel("Agent: - | Server: -")
+        self.agent_info.setObjectName("SubTitleLabel")
 
         title_col.addWidget(title)
         title_col.addWidget(subtitle)
+        title_col.addWidget(self.agent_info)
+
+        self.job_badge = QLabel("Idle")
+        self.job_badge.setObjectName("ModeBadge")
+        self.job_badge.setAlignment(Qt.AlignCenter)
+        self.job_badge.setFixedHeight(34)
+        self.job_badge.setMinimumWidth(150)
 
         self.mode_badge = QLabel("LOCAL MODE")
         self.mode_badge.setObjectName("ModeBadge")
@@ -110,6 +128,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo_label)
         layout.addLayout(title_col)
         layout.addStretch()
+        layout.addWidget(self.job_badge, alignment=Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self.mode_badge, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
         return frame
@@ -169,10 +188,63 @@ class MainWindow(QMainWindow):
 
         return frame
 
-    def refresh_server_status(self):
-        self.server_sync.ping_server()
+    def refresh_server_status_async(self):
+        if self._status_busy:
+            return
+        self._status_busy = True
 
-        if app_state.current_mode == "SERVER" and app_state.server_online:
-            self.mode_badge.setText("SERVER MODE")
-        else:
-            self.mode_badge.setText("LOCAL MODE")
+        self.status_thread = QThread()
+        self.status_worker = ServerStatusWorker(self.server_sync, app_state)
+        self.status_worker.moveToThread(self.status_thread)
+
+        self.status_thread.started.connect(self.status_worker.run)
+        self.status_worker.finished.connect(self._apply_server_status)
+        self.status_worker.error.connect(self._on_server_status_error)
+
+        self.status_worker.finished.connect(self.status_thread.quit)
+        self.status_worker.error.connect(self.status_thread.quit)
+        self.status_worker.finished.connect(self.status_worker.deleteLater)
+        self.status_worker.error.connect(self.status_worker.deleteLater)
+        self.status_thread.finished.connect(self.status_thread.deleteLater)
+
+        self.status_thread.start()
+
+    def _apply_server_status(self, data: dict):
+        self._status_busy = False
+
+        self.agent_info.setText(f"Agent: {data['agent_id']} | Server: {data['server_url']}")
+        self.mode_badge.setText("SERVER MODE" if data["mode"] == "SERVER" and data["server_online"] else "LOCAL MODE")
+
+        current_job = data.get("current_job", "-")
+        self.job_badge.setText(f"JOB: {current_job[:8]}" if current_job not in [None, "-", ""] else "Idle")
+
+    def _on_server_status_error(self, _message: str):
+        self._status_busy = False
+
+    def run_job_poll_async(self):
+        if self._job_busy:
+            return
+        self._job_busy = True
+
+        self.job_thread = QThread()
+        self.job_worker = JobPollWorker(self.server_sync)
+        self.job_worker.moveToThread(self.job_thread)
+
+        self.job_thread.started.connect(self.job_worker.run)
+        self.job_worker.finished.connect(self._on_job_poll_done)
+        self.job_worker.error.connect(self._on_job_poll_error)
+
+        self.job_worker.finished.connect(self.job_thread.quit)
+        self.job_worker.error.connect(self.job_thread.quit)
+        self.job_worker.finished.connect(self.job_worker.deleteLater)
+        self.job_worker.error.connect(self.job_worker.deleteLater)
+        self.job_thread.finished.connect(self.job_thread.deleteLater)
+
+        self.job_thread.start()
+
+    def _on_job_poll_done(self):
+        self._job_busy = False
+        self.refresh_server_status_async()
+
+    def _on_job_poll_error(self, _message: str):
+        self._job_busy = False
