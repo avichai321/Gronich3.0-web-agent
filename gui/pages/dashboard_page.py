@@ -6,6 +6,7 @@ from core.config_manager import load_agent_config, load_general_settings
 from services.kms_service import AgentKmsService
 from services.datalink_service import AgentDataLinkService
 from services.server_sync_service import AgentServerSyncService
+from services.tod_service import AgentTodService
 
 
 class InfoCard(QFrame):
@@ -36,6 +37,7 @@ class DashboardPage(QWidget):
         self.kms_service = AgentKmsService()
         self.dl_service = AgentDataLinkService()
         self.server_sync = AgentServerSyncService()
+        self.tod_service = AgentTodService()
 
         root = QVBoxLayout(self)
 
@@ -96,7 +98,7 @@ class DashboardPage(QWidget):
 
         kms_rows = self.kms_service.get_rows()
         dl_rows = self.dl_service.get_rows()
-        tod_status = self.dl_service.get_tod_status()
+        tod_status = self.tod_service.get_status()
 
         kms_connected = sum(1 for row in kms_rows if row.get("status") == "connected")
         dl_active = sum(1 for row in dl_rows if row.get("environment") != "Free to connect")

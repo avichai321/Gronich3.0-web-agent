@@ -1,252 +1,178 @@
-from datetime import datetime
-import requests
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QSpacerItem,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core.app_state import app_state
-from core.config_manager import load_agent_config
-from core.logger import log
-from services.file_copy_service import AgentFileCopyService
+from gui.pages.dashboard_page import DashboardPage
+from gui.pages.file_copy_page import FileCopyPage
+from gui.pages.kms_page import KmsPage
+from gui.pages.datalink_page import DataLinkPage
+from gui.pages.logs_page import LogsPage
+from gui.theme import DARK_STYLE
+from services.server_sync_service import AgentServerSyncService
+from gui.pages.tod_page import TodPage
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+LOGO_PATH = BASE_DIR / "assets" / "logo.png"
 
 
-class AgentServerSyncService:
+class MainWindow(QMainWindow):
     def __init__(self):
-        self.config = load_agent_config()
+        super().__init__()
 
-    def reload_config(self):
-        self.config = load_agent_config()
+        self.server_sync = AgentServerSyncService()
 
-    def _get_server_settings(self):
-        self.reload_config()
-        return {
-            "url": self.config.get("server", "url", fallback="").rstrip("/"),
-            "agent_id": self.config.get("server", "agent_id", fallback="agent-1"),
-            "token": self.config.get("server", "token", fallback=""),
-            "mode": self.config.get("server", "mode", fallback="local").lower(),
-        }
+        self.setWindowTitle("Gronich Agent")
+        self.resize(1450, 900)
+        self.setStyleSheet(DARK_STYLE)
 
-    def ping_server(self) -> bool:
-        settings = self._get_server_settings()
-        server_url = settings["url"]
+        central = QWidget()
+        self.setCentralWidget(central)
 
-        app_state.server_url = server_url
-        app_state.agent_id = settings["agent_id"]
+        root = QVBoxLayout(central)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(14)
 
-        if settings["mode"] != "server":
-            app_state.current_mode = "LOCAL"
-            app_state.server_online = False
-            return False
+        root.addWidget(self._build_header())
 
-        if not server_url:
-            app_state.current_mode = "LOCAL"
-            app_state.server_online = False
-            app_state.last_error = "Server URL is empty"
-            return False
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        root.addLayout(body, 1)
 
-        try:
-            res = requests.get(f"{server_url}/", timeout=5)
-            if res.ok:
-                app_state.server_online = True
-                app_state.current_mode = "SERVER"
-                app_state.last_error = ""
-                return True
+        sidebar = self._build_sidebar()
+        content = self._build_content()
 
-            app_state.server_online = False
-            app_state.current_mode = "LOCAL"
-            app_state.last_error = f"Server ping failed with HTTP {res.status_code}"
-            return False
+        body.addWidget(sidebar, 1)
+        body.addWidget(content, 5)
 
-        except Exception as exc:
-            app_state.server_online = False
-            app_state.current_mode = "LOCAL"
-            app_state.last_error = str(exc)
-            return False
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self.refresh_server_status)
+        self.status_timer.start(10000)
 
-    def register(self) -> bool:
-        settings = self._get_server_settings()
-        server_url = settings["url"]
+        self.refresh_server_status()
 
-        if not self.ping_server():
-            return False
+        self.job_timer = QTimer(self)
+        self.job_timer.timeout.connect(self.run_job_poll)
+        self.job_timer.start(5000)
+    
+    def run_job_poll(self):
+        self.server_sync.execute_pending_job()
+    
+    def _build_header(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("HeaderFrame")
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(14)
 
-        payload = {
-            "agent_id": settings["agent_id"],
-            "hostname": settings["agent_id"],
-            "version": "1.0.0",
-            "os_type": "windows",
-            "token": settings["token"],
-        }
-
-        try:
-            res = requests.post(f"{server_url}/api/agents/register", json=payload, timeout=8)
-            if res.ok:
-                app_state.last_register = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                log(f"Agent registered successfully: {settings['agent_id']}")
-                return True
-
-            app_state.last_error = f"Register failed with HTTP {res.status_code}"
-            log(app_state.last_error)
-            return False
-
-        except Exception as exc:
-            app_state.last_error = str(exc)
-            log(f"Register exception: {exc}")
-            return False
-
-    def heartbeat(self) -> bool:
-        settings = self._get_server_settings()
-        server_url = settings["url"]
-
-        if not self.ping_server():
-            return False
-
-        payload = {
-            "agent_id": settings["agent_id"],
-            "status": "idle" if app_state.current_job in [None, "-", ""] else "busy",
-            "current_job_id": None if app_state.current_job in [None, "-", ""] else app_state.current_job,
-            "mode": app_state.current_mode,
-        }
-
-        try:
-            res = requests.post(f"{server_url}/api/agents/heartbeat", json=payload, timeout=8)
-            if res.ok:
-                app_state.last_heartbeat = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                log(f"Heartbeat sent successfully: {settings['agent_id']}")
-                return True
-
-            app_state.last_error = f"Heartbeat failed with HTTP {res.status_code}"
-            log(app_state.last_error)
-            return False
-
-        except Exception as exc:
-            app_state.last_error = str(exc)
-            log(f"Heartbeat exception: {exc}")
-            return False
-
-    def poll_next_job(self) -> dict | None:
-        settings = self._get_server_settings()
-        server_url = settings["url"]
-        agent_id = settings["agent_id"]
-
-        if not self.ping_server():
-            return None
-
-        try:
-            res = requests.get(f"{server_url}/api/agent-jobs/next/{agent_id}", timeout=8)
-            if not res.ok:
-                return None
-
-            data = res.json()
-            return data.get("job")
-        except Exception as exc:
-            app_state.last_error = str(exc)
-            return None
-
-    def submit_job_result(self, job_id: str, status: str, result: dict | None = None, message: str | None = None) -> bool:
-        settings = self._get_server_settings()
-        server_url = settings["url"]
-
-        try:
-            res = requests.post(
-                f"{server_url}/api/agent-jobs/{job_id}/result",
-                json={
-                    "status": status,
-                    "result": result or {},
-                    "message": message,
-                },
-                timeout=10,
+        logo_label = QLabel()
+        if LOGO_PATH.exists():
+            pixmap = QPixmap(str(LOGO_PATH))
+            logo_label.setPixmap(
+                pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
-            return res.ok
-        except Exception as exc:
-            app_state.last_error = str(exc)
-            return False
+        else:
+            logo_label.setText("No Logo")
+        logo_label.setFixedSize(72, 72)
+        logo_label.setAlignment(Qt.AlignCenter)
 
-    def execute_pending_job(self):
-        job = self.poll_next_job()
-        if not job:
-            return
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
 
-        app_state.current_job = job.get("job_id", "-")
+        title = QLabel("Gronich Agent")
+        title.setObjectName("TitleLabel")
 
-        try:
-            if job["job_type"] == "file_copy_browse":
-                payload = job["payload"]
-                svc = AgentFileCopyService()
+        subtitle = QLabel("Local control console for File Copy, KMS and Data-Link")
+        subtitle.setObjectName("SubTitleLabel")
 
-                session = svc.create_session(
-                    component_name=payload["component_name"],
-                    connection_mode=payload["connection_mode"],
-                    kms_station_name=payload.get("kms_station_name"),
-                    key_name=payload["key_name"],
-                    override_host=payload.get("override_host"),
-                    override_user=payload.get("override_user"),
-                    override_port=payload.get("override_port"),
-                )
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
 
-                if not session.get("success"):
-                    self.submit_job_result(
-                        job["job_id"],
-                        "failed",
-                        result={},
-                        message=session.get("message", "Create session failed"),
-                    )
-                    return
+        self.mode_badge = QLabel("LOCAL MODE")
+        self.mode_badge.setObjectName("ModeBadge")
+        self.mode_badge.setAlignment(Qt.AlignCenter)
+        self.mode_badge.setFixedHeight(34)
+        self.mode_badge.setMinimumWidth(150)
 
-                items = svc.list_remote_items(payload.get("path", "."))
-                self.submit_job_result(
-                    job["job_id"],
-                    "completed",
-                    result={"items": items},
-                    message="Browse completed successfully",
-                )
-                return
+        layout.addWidget(logo_label)
+        layout.addLayout(title_col)
+        layout.addStretch()
+        layout.addWidget(self.mode_badge, alignment=Qt.AlignRight | Qt.AlignVCenter)
 
-            if job["job_type"] == "file_copy_copy":
-                payload = job["payload"]
-                svc = AgentFileCopyService()
+        return frame
 
-                session = svc.create_session(
-                    component_name=payload["component_name"],
-                    connection_mode=payload["connection_mode"],
-                    kms_station_name=payload.get("kms_station_name"),
-                    key_name=payload["key_name"],
-                    override_host=payload.get("override_host"),
-                    override_user=payload.get("override_user"),
-                    override_port=payload.get("override_port"),
-                )
+    def _build_sidebar(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("SidebarFrame")
+        frame.setMinimumWidth(250)
+        frame.setMaximumWidth(300)
 
-                if not session.get("success"):
-                    self.submit_job_result(
-                        job["job_id"],
-                        "failed",
-                        result={},
-                        message=session.get("message", "Create session failed"),
-                    )
-                    return
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
-                result = svc.start_copy(
-                    selected_paths=payload.get("selected_paths", []),
-                    destination_mode=payload.get("destination_mode", "smb"),
-                    override_export_path=payload.get("override_export_path"),
-                    override_smb_username=payload.get("override_smb_username"),
-                    override_smb_password=payload.get("override_smb_password"),
-                )
+        nav_title = QLabel("Navigation")
+        nav_title.setObjectName("SectionTitle")
+        layout.addWidget(nav_title)
 
-                self.submit_job_result(
-                    job["job_id"],
-                    "completed" if result.get("success") else "failed",
-                    result=result,
-                    message=result.get("message", "Copy finished"),
-                )
-                return
+        self.stack = QStackedWidget()
 
-            self.submit_job_result(
-                job["job_id"],
-                "failed",
-                result={},
-                message=f"Unsupported job type: {job['job_type']}",
-            )
+        self.pages = [
+            ("Dashboard", DashboardPage()),
+            ("File Copy", FileCopyPage()),
+            ("KMS", KmsPage()),
+            ("Data-Link", DataLinkPage()),
+            ("TOD-SIL", TodPage()),
+            ("Logs", LogsPage()),
+        ]
 
-        except Exception as exc:
-            self.submit_job_result(job["job_id"], "failed", result={}, message=str(exc))
-        finally:
-            app_state.current_job = "-"
-            self.heartbeat()
+        for index, (name, page) in enumerate(self.pages):
+            btn = QPushButton(name)
+            btn.setObjectName("NavButton")
+            btn.clicked.connect(lambda checked=False, idx=index: self.stack.setCurrentIndex(idx))
+            layout.addWidget(btn)
+
+        layout.addItem(QSpacerItem(20, 20, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        footer = QLabel("Made by Avichai Avicii Dahan")
+        footer.setObjectName("SubTitleLabel")
+        footer.setAlignment(Qt.AlignCenter)
+        layout.addWidget(footer)
+
+        return frame
+
+    def _build_content(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("ContentFrame")
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        layout.addWidget(self.stack)
+
+        for _, page in self.pages:
+            self.stack.addWidget(page)
+
+        return frame
+
+    def refresh_server_status(self):
+        self.server_sync.ping_server()
+
+        if app_state.current_mode == "SERVER" and app_state.server_online:
+            self.mode_badge.setText("SERVER MODE")
+        else:
+            self.mode_badge.setText("LOCAL MODE")
