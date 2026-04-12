@@ -195,7 +195,9 @@ def load_all_config(config_file: str = LOCAL_RUNTIME):
                 {
                     "section_name": section,
                     "name": config[section].get("name", ""),
-                    "ip_policy_command": config[section].get("ip_policy_command", ""),
+                    "match_mode": config[section].get("match_mode", "policy"),
+                    "detect_command": config[section].get("detect_command", ""),
+                    "apply_command": config[section].get("apply_command", ""),
                 }
             )
 

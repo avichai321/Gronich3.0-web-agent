@@ -54,12 +54,33 @@ class AgentTodService:
         if error:
             return {"status": "error", "env": "Unknown"}
 
-        for env in tod_envs:
-            if env["ip_policy_command"] in output:
-                return {"status": "connected", "env": env["name"]}
+        policy_line = ""
+        for line in output.splitlines():
+            clean = line.strip()
+            if clean.startswith("ip policy "):
+                policy_line = clean
+                break
 
-        return {"status": "connected", "env": "Unknown"}
+        if policy_line:
+            for env in tod_envs:
+                if env.get("match_mode", "policy") == "policy":
+                    if env.get("detect_command", "").strip() == policy_line:
+                        return {
+                            "status": "connected",
+                            "env": env["name"],
+                        }
+        else:
+            for env in tod_envs:
+                if env.get("match_mode") == "no_policy":
+                    return {
+                        "status": "connected",
+                        "env": env["name"],
+                    }
 
+        return {
+            "status": "connected",
+            "env": "Unknown",
+        }
     # =========================
     # OPTIONS
     # =========================
@@ -108,7 +129,7 @@ class AgentTodService:
             "enable",
             "configure terminal",
             f"interface vlan {tod_switch['tod_vlan']}",
-            target_env["ip_policy_command"],
+            target_env["apply_command"],
             "no shutdown",
             "end",
             "write memory",
