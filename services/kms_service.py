@@ -1,8 +1,7 @@
-from core.config_manager import load_all_config, build_vlan_to_kms_map, get_single_section
+from core.config_manager import load_all_config, build_vlan_to_kms_map, get_single_section ,get_local_kms_station_name , get_kms_station_by_name
 from services.helpers_service import get_port_by_desc
 from services.parsing_service import parse_show_interfaces_status
 from services.ssh_service import SSHService, run_ios_commands
-
 
 class AgentKmsService:
     def _get_runtime(self):
@@ -76,25 +75,46 @@ class AgentKmsService:
             return rows
         return self._build_dry_run_rows_from_config()
 
+    
+
     def get_options(self):
         _, _, _, vlan_to_station, rows = self._get_runtime()
+        local_station_name = get_local_kms_station_name()
 
         if rows:
+            planes = [row["description"] for row in rows]
+
+            # Agent should only expose its own KMS station
+            if local_station_name:
+                return {
+                    "planes": planes,
+                    "stations": [local_station_name],
+                }
+
             used_vlans = {row["vlan"] for row in rows if row["status"] == "connected"}
             free_stations = [name for vlan, name in vlan_to_station.items() if vlan not in used_vlans]
-            planes = [row["description"] for row in rows]
             return {
                 "planes": planes,
                 "stations": sorted(free_stations),
             }
 
         dry_rows = self._build_dry_run_rows_from_config()
+
+        if local_station_name:
+            return {
+                "planes": [row["description"] for row in dry_rows],
+                "stations": [local_station_name],
+            }
+
         return {
             "planes": [row["description"] for row in dry_rows],
             "stations": sorted(list(vlan_to_station.values())),
         }
 
     def connect_station(self, plane_description: str, station_name: str):
+        local_station_name = get_local_kms_station_name()
+        if local_station_name:
+            station_name = local_station_name
         kms_info, int_kms_dec, _, vlan_to_station, rows = self._get_runtime()
 
         if not rows:

@@ -269,3 +269,7 @@ def get_env_state_by_name(env_state: list[dict], name: str) -> list[str]:
         if env.get("env_name") == name:
             return [key for key in env.keys() if key.startswith("state_")]
     return []
+
+def get_local_kms_station_name() -> str:
+    config = load_agent_config()
+    return config.get("server", "agent_id", fallback="").strip()

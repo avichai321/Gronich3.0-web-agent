@@ -37,6 +37,7 @@ class KmsPage(QWidget):
 
         self.plane_box = QComboBox()
         self.station_box = QComboBox()
+        self.station_box.setEnabled(False)
 
         left.addWidget(QLabel("Plane / Interface"))
         left.addWidget(self.plane_box)
