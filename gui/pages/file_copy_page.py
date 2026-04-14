@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QPushButton,
     QComboBox,
@@ -16,6 +17,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QFrame,
+    QSplitter,
+    QSizePolicy,
 )
 
 from services.file_copy_service import AgentFileCopyService
@@ -30,15 +33,18 @@ class StatCard(QFrame):
     def __init__(self, title: str, value: str):
         super().__init__()
         self.setObjectName("PanelCard")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(4)
 
         self.title_label = QLabel(title)
         self.title_label.setObjectName("MutedText")
 
         self.value_label = QLabel(value)
         self.value_label.setObjectName("PanelTitle")
+        self.value_label.setWordWrap(True)
 
         layout.addWidget(self.title_label)
         layout.addWidget(self.value_label)
@@ -67,6 +73,7 @@ class FileCopyPage(QWidget):
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
 
         title = QLabel("File Copy")
         title.setObjectName("SectionTitle")
@@ -76,38 +83,49 @@ class FileCopyPage(QWidget):
             "Maintenance = copy through this KMS station. Direct = direct access from this machine."
         )
         subtitle.setObjectName("SubTitleLabel")
+        subtitle.setWordWrap(True)
         root.addWidget(subtitle)
 
-        stats_row = QHBoxLayout()
-        root.addLayout(stats_row)
+        stats_grid = QGridLayout()
+        stats_grid.setHorizontalSpacing(12)
+        stats_grid.setVerticalSpacing(12)
+        root.addLayout(stats_grid)
 
         self.mode_card = StatCard("Mode", "Maintenance")
         self.path_card = StatCard("Current Path", ".")
         self.items_card = StatCard("Visible Items", "0")
         self.dest_card = StatCard("Destination Mode", "smb")
 
-        stats_row.addWidget(self.mode_card)
-        stats_row.addWidget(self.path_card)
-        stats_row.addWidget(self.items_card)
-        stats_row.addWidget(self.dest_card)
+        stats_grid.addWidget(self.mode_card, 0, 0)
+        stats_grid.addWidget(self.path_card, 0, 1)
+        stats_grid.addWidget(self.items_card, 0, 2)
+        stats_grid.addWidget(self.dest_card, 0, 3)
 
-        main_row = QHBoxLayout()
-        root.addLayout(main_row, 1)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        root.addWidget(splitter, 1)
 
         left_panel = QFrame()
         left_panel.setObjectName("PanelCard")
+        left_panel.setMinimumWidth(360)
+        left_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(14, 14, 14, 14)
         left_layout.setSpacing(10)
 
         right_panel = QFrame()
         right_panel.setObjectName("PanelCard")
+        right_panel.setMinimumWidth(520)
+        right_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(14, 14, 14, 14)
         right_layout.setSpacing(10)
 
-        main_row.addWidget(left_panel, 2)
-        main_row.addWidget(right_panel, 3)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([420, 980])
 
         left_title = QLabel("Session Settings")
         left_title.setObjectName("PanelTitle")
@@ -142,6 +160,7 @@ class FileCopyPage(QWidget):
 
         self.mode_info = QLabel("Maintenance mode uses this KMS station for browse and copy.")
         self.mode_info.setObjectName("MutedText")
+        self.mode_info.setWordWrap(True)
         left_layout.addWidget(self.mode_info)
 
         btn_row_top = QHBoxLayout()
@@ -180,11 +199,14 @@ class FileCopyPage(QWidget):
 
         self.path_label = QLabel("Current path: .")
         self.path_label.setObjectName("MutedText")
+        self.path_label.setWordWrap(True)
         right_layout.addWidget(self.path_label)
 
         self.list_widget = QListWidget()
         self.list_widget.itemDoubleClicked.connect(self.handle_open_item)
         self.list_widget.setSelectionMode(QListWidget.MultiSelection)
+        self.list_widget.setMinimumWidth(450)
+        self.list_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout.addWidget(self.list_widget, 3)
 
         details_title = QLabel("Operation Output")
@@ -193,6 +215,7 @@ class FileCopyPage(QWidget):
 
         self.output = QTextEdit()
         self.output.setReadOnly(True)
+        self.output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout.addWidget(self.output, 2)
 
         self.connect_btn.clicked.connect(self.handle_connect)
