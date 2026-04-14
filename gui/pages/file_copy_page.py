@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
@@ -18,8 +18,12 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 
-
 from services.file_copy_service import AgentFileCopyService
+from gui.page_workers import (
+    FileCopyConnectWorker,
+    FileCopyBrowseWorker,
+    FileCopyCopyWorker,
+)
 
 
 class StatCard(QFrame):
@@ -56,6 +60,10 @@ class FileCopyPage(QWidget):
         self.current_items = []
         self.current_path = "."
         self.last_result_path = ""
+
+        self._connect_busy = False
+        self._browse_busy = False
+        self._copy_busy = False
 
         root = QVBoxLayout(self)
         root.setSpacing(12)
@@ -209,6 +217,20 @@ class FileCopyPage(QWidget):
         self.status_badge.style().unpolish(self.status_badge)
         self.status_badge.style().polish(self.status_badge)
 
+    def set_controls_enabled(self, enabled: bool):
+        self.connect_btn.setEnabled(enabled and not self._connect_busy)
+        self.refresh_btn.setEnabled(enabled and not self._browse_busy)
+        self.copy_btn.setEnabled(enabled and not self._copy_busy)
+        self.root_btn.setEnabled(enabled and not self._browse_busy)
+        self.up_btn.setEnabled(enabled and not self._browse_busy)
+        self.mode_combo.setEnabled(enabled and not self._connect_busy and not self._copy_busy)
+        self.dest_combo.setEnabled(enabled and not self._copy_busy)
+        self.component_combo.setEnabled(enabled and not self._connect_busy and not self._copy_busy)
+        self.key_combo.setEnabled(enabled and not self._connect_busy and not self._copy_busy)
+
+        is_maintenance = self.mode_combo.currentText().strip() == "Maintenance"
+        self.kms_combo.setEnabled(enabled and is_maintenance and not self._connect_busy and not self._copy_busy)
+
     def _update_cards(self):
         self.mode_card.set_value(self.mode_combo.currentText())
         self.path_card.set_value(self.current_path)
@@ -232,32 +254,56 @@ class FileCopyPage(QWidget):
 
     def _toggle_kms_state(self, display_mode: str):
         is_maintenance = display_mode == "Maintenance"
-        self.kms_combo.setEnabled(is_maintenance)
 
         if is_maintenance:
             self.mode_info.setText("Maintenance mode uses this KMS station for browse and copy.")
         else:
             self.mode_info.setText("Direct mode connects directly from this machine to the component.")
 
+        self.set_controls_enabled(True)
         self._update_cards()
 
     def handle_connect(self):
+        if self._connect_busy:
+            return
+
         component_name = self.component_combo.currentText().strip()
         display_mode = self.mode_combo.currentText().strip()
         connection_mode = self.MODE_TO_INTERNAL[display_mode]
         kms_station_name = self.kms_combo.currentText().strip() if connection_mode == "bridge" else None
         key_name = self.key_combo.currentText().strip()
 
+        self._connect_busy = True
+        self.set_controls_enabled(False)
         self.progress.setValue(15)
         self.set_status("Connecting...")
         self.append_output(f"Connecting in {display_mode} mode...")
 
-        result = self.service.create_session(
-            component_name=component_name,
-            connection_mode=connection_mode,
-            kms_station_name=kms_station_name,
-            key_name=key_name,
+        self.connect_thread = QThread()
+        self.connect_worker = FileCopyConnectWorker(
+            self.service,
+            component_name,
+            connection_mode,
+            kms_station_name,
+            key_name,
         )
+        self.connect_worker.moveToThread(self.connect_thread)
+
+        self.connect_thread.started.connect(self.connect_worker.run)
+        self.connect_worker.finished.connect(self._on_connect_finished)
+        self.connect_worker.error.connect(self._on_connect_error)
+
+        self.connect_worker.finished.connect(self.connect_thread.quit)
+        self.connect_worker.error.connect(self.connect_thread.quit)
+        self.connect_worker.finished.connect(self.connect_worker.deleteLater)
+        self.connect_worker.error.connect(self.connect_worker.deleteLater)
+        self.connect_thread.finished.connect(self.connect_thread.deleteLater)
+
+        self.connect_thread.start()
+
+    def _on_connect_finished(self, result: dict):
+        self._connect_busy = False
+        self.set_controls_enabled(True)
 
         if not result.get("success"):
             self.progress.setValue(0)
@@ -273,6 +319,14 @@ class FileCopyPage(QWidget):
         self.set_status("Connected", good=True)
         self.append_output(result.get("message", "Connected"))
         self._update_cards()
+
+    def _on_connect_error(self, message: str):
+        self._connect_busy = False
+        self.set_controls_enabled(True)
+        self.progress.setValue(0)
+        self.set_status("Connect failed")
+        self.append_output(f"Connect error: {message}")
+        QMessageBox.critical(self, "Connect Failed", message)
 
     def fill_items(self, items: list[dict]):
         self.current_items = items
@@ -307,15 +361,47 @@ class FileCopyPage(QWidget):
         self._update_cards()
 
     def load_path(self, path: str):
+        if self._browse_busy:
+            return
+
+        self._browse_busy = True
+        self.set_controls_enabled(False)
         self.progress.setValue(25)
         self.set_status("Loading path...")
         self.current_path = path
         self.path_label.setText(f"Current path: {self.current_path}")
-        items = self.service.list_remote_items(path)
+
+        self.browse_thread = QThread()
+        self.browse_worker = FileCopyBrowseWorker(self.service, path)
+        self.browse_worker.moveToThread(self.browse_thread)
+
+        self.browse_thread.started.connect(self.browse_worker.run)
+        self.browse_worker.finished.connect(self._on_browse_finished)
+        self.browse_worker.error.connect(self._on_browse_error)
+
+        self.browse_worker.finished.connect(self.browse_thread.quit)
+        self.browse_worker.error.connect(self.browse_thread.quit)
+        self.browse_worker.finished.connect(self.browse_worker.deleteLater)
+        self.browse_worker.error.connect(self.browse_worker.deleteLater)
+        self.browse_thread.finished.connect(self.browse_thread.deleteLater)
+
+        self.browse_thread.start()
+
+    def _on_browse_finished(self, items: list[dict]):
+        self._browse_busy = False
+        self.set_controls_enabled(True)
         self.fill_items(items)
         self.progress.setValue(100)
         self.set_status("Ready", good=True)
-        self.append_output(f"Loaded path: {path}")
+        self.append_output(f"Loaded path: {self.current_path}")
+
+    def _on_browse_error(self, message: str):
+        self._browse_busy = False
+        self.set_controls_enabled(True)
+        self.progress.setValue(0)
+        self.set_status("Browse failed")
+        self.append_output(f"Browse error: {message}")
+        QMessageBox.critical(self, "Browse Failed", message)
 
     def handle_refresh(self):
         self.load_path(self.current_path)
@@ -340,6 +426,9 @@ class FileCopyPage(QWidget):
         self.load_path(new_path)
 
     def handle_copy(self):
+        if self._copy_busy:
+            return
+
         selected = self.list_widget.selectedItems()
         selected_paths = []
 
@@ -356,11 +445,32 @@ class FileCopyPage(QWidget):
         self.append_output(f"Starting copy in {display_mode} mode...")
         self.progress.setValue(40)
         self.set_status("Copying...")
+        self._copy_busy = True
+        self.set_controls_enabled(False)
 
-        result = self.service.start_copy(
-            selected_paths=selected_paths,
-            destination_mode=self.dest_combo.currentText().strip(),
+        self.copy_thread = QThread()
+        self.copy_worker = FileCopyCopyWorker(
+            self.service,
+            selected_paths,
+            self.dest_combo.currentText().strip(),
         )
+        self.copy_worker.moveToThread(self.copy_thread)
+
+        self.copy_thread.started.connect(self.copy_worker.run)
+        self.copy_worker.finished.connect(self._on_copy_finished)
+        self.copy_worker.error.connect(self._on_copy_error)
+
+        self.copy_worker.finished.connect(self.copy_thread.quit)
+        self.copy_worker.error.connect(self.copy_thread.quit)
+        self.copy_worker.finished.connect(self.copy_worker.deleteLater)
+        self.copy_worker.error.connect(self.copy_worker.deleteLater)
+        self.copy_thread.finished.connect(self.copy_thread.deleteLater)
+
+        self.copy_thread.start()
+
+    def _on_copy_finished(self, result: dict):
+        self._copy_busy = False
+        self.set_controls_enabled(True)
 
         if not result.get("success"):
             self.progress.setValue(0)
@@ -386,18 +496,35 @@ class FileCopyPage(QWidget):
             if reply == QMessageBox.Yes:
                 self._open_path(dest)
 
+    def _on_copy_error(self, message: str):
+        self._copy_busy = False
+        self.set_controls_enabled(True)
+        self.progress.setValue(0)
+        self.set_status("Copy failed")
+        self.append_output(f"Copy error: {message}")
+        QMessageBox.critical(self, "Copy Failed", message)
+
     def _open_path(self, path: str):
         try:
-            if path.lower().endswith(".zip") and os.path.exists(path):
-                subprocess.Popen(f'explorer /select,"{path}"')
-                return
+            if os.name == "nt":
+                if path.lower().endswith(".zip") and os.path.exists(path):
+                    subprocess.Popen(f'explorer /select,"{path}"')
+                    return
 
-            if os.path.exists(path):
-                subprocess.Popen(f'explorer "{path}"')
-                return
+                if os.path.exists(path):
+                    subprocess.Popen(f'explorer "{path}"')
+                    return
 
-            parent_dir = os.path.dirname(path)
-            if parent_dir and os.path.exists(parent_dir):
-                subprocess.Popen(f'explorer "{parent_dir}"')
+                parent_dir = os.path.dirname(path)
+                if parent_dir and os.path.exists(parent_dir):
+                    subprocess.Popen(f'explorer "{parent_dir}"')
+            else:
+                if os.path.exists(path):
+                    subprocess.Popen(["xdg-open", path])
+                    return
+
+                parent_dir = os.path.dirname(path)
+                if parent_dir and os.path.exists(parent_dir):
+                    subprocess.Popen(["xdg-open", parent_dir])
         except Exception as exc:
             self.append_output(f"Failed to open path: {exc}")

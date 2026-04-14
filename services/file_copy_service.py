@@ -220,6 +220,7 @@ class AgentFileCopyService:
             return {"success": False, "message": str(exc)}
 
     def _copy_direct(self, selected_paths: list[str], destination_path: str) -> None:
+        log(f"Copying: {src}")
         session = self.current_session
         os.makedirs(destination_path, exist_ok=True)
 
@@ -254,6 +255,7 @@ class AgentFileCopyService:
         smb_username: str = "",
         smb_password: str = "",
     ) -> None:
+        log(f"Copying: {src}")
         session = self.current_session
         os.makedirs(destination_path, exist_ok=True)
 
@@ -303,8 +305,9 @@ class AgentFileCopyService:
         )
 
     def _download_recursive(self, sftp: paramiko.SFTPClient, remote_path: str, local_path: str) -> None:
+        
         attrs = sftp.stat(remote_path)
-
+        log(f"Copying: {local_path} from {remote_path} (size: {attrs.st_size}, mode: {oct(attrs.st_mode)})")
         if statmod.S_ISDIR(attrs.st_mode):
             os.makedirs(local_path, exist_ok=True)
             for entry in sftp.listdir_attr(remote_path):

@@ -9,6 +9,7 @@ from services.file_copy_service import AgentFileCopyService
 class AgentServerSyncService:
     def __init__(self):
         self.config = load_agent_config()
+        self._job_running = False
 
     def reload_config(self):
         self.config = load_agent_config()
@@ -161,6 +162,11 @@ class AgentServerSyncService:
 
 
     def execute_pending_job(self):
+        if getattr(self, "_job_running", False):
+            return
+
+        self._job_running = True
+
         job = self.poll_next_job()
         if not job:
             return
@@ -235,3 +241,4 @@ class AgentServerSyncService:
             self.submit_job_result(job["job_id"], "failed", result={}, message=str(exc))
         finally:
             app_state.current_job = "-"
+            self._job_running = False

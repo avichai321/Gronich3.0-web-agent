@@ -128,3 +128,82 @@ class TodConnectWorker(QObject):
             self.finished.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))
+
+class FileCopyConnectWorker(QObject):
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, service, component_name: str, connection_mode: str, kms_station_name: str | None, key_name: str):
+        super().__init__()
+        self.service = service
+        self.component_name = component_name
+        self.connection_mode = connection_mode
+        self.kms_station_name = kms_station_name
+        self.key_name = key_name
+
+    @Slot()
+    def run(self):
+        try:
+            result = self.service.create_session(
+                component_name=self.component_name,
+                connection_mode=self.connection_mode,
+                kms_station_name=self.kms_station_name,
+                key_name=self.key_name,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class FileCopyBrowseWorker(QObject):
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, service, path: str):
+        super().__init__()
+        self.service = service
+        self.path = path
+
+    @Slot()
+    def run(self):
+        try:
+            items = self.service.list_remote_items(self.path)
+            self.finished.emit(items)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class FileCopyCopyWorker(QObject):
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        service,
+        selected_paths: list[str],
+        destination_mode: str,
+        override_export_path: str | None = None,
+        override_smb_username: str | None = None,
+        override_smb_password: str | None = None,
+    ):
+        super().__init__()
+        self.service = service
+        self.selected_paths = selected_paths
+        self.destination_mode = destination_mode
+        self.override_export_path = override_export_path
+        self.override_smb_username = override_smb_username
+        self.override_smb_password = override_smb_password
+
+    @Slot()
+    def run(self):
+        try:
+            result = self.service.start_copy(
+                selected_paths=self.selected_paths,
+                destination_mode=self.destination_mode,
+                override_export_path=self.override_export_path,
+                override_smb_username=self.override_smb_username,
+                override_smb_password=self.override_smb_password,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.error.emit(str(exc))
