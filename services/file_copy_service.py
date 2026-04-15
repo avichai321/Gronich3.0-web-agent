@@ -1,6 +1,5 @@
 import os
 import posixpath
-import shutil
 import stat as statmod
 import subprocess
 import tempfile
@@ -19,6 +18,9 @@ from core.config_manager import (
     load_kms_stations,
 )
 from core.logger import log
+
+
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 class AgentFileCopyService:
@@ -139,6 +141,8 @@ class AgentFileCopyService:
             "ssh",
             "-i", key_path,
             "-o", "BatchMode=yes",
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PreferredAuthentications=publickey",
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "ConnectTimeout=10",
@@ -152,6 +156,7 @@ class AgentFileCopyService:
             capture_output=True,
             text=True,
             timeout=30,
+            creationflags=CREATE_NO_WINDOW,
         )
 
         combined = "\n".join([result.stdout.strip(), result.stderr.strip()]).strip()
@@ -220,7 +225,6 @@ class AgentFileCopyService:
             return {"success": False, "message": str(exc)}
 
     def _copy_direct(self, selected_paths: list[str], destination_path: str) -> None:
-        log(f"Copying: {src}")
         session = self.current_session
         os.makedirs(destination_path, exist_ok=True)
 
@@ -255,7 +259,6 @@ class AgentFileCopyService:
         smb_username: str = "",
         smb_password: str = "",
     ) -> None:
-        log(f"Copying: {src}")
         session = self.current_session
         os.makedirs(destination_path, exist_ok=True)
 
@@ -270,6 +273,8 @@ class AgentFileCopyService:
                 "-r",
                 "-i", session["local_key_path"],
                 "-o", "BatchMode=yes",
+                "-o", "IdentitiesOnly=yes",
+                "-o", "PreferredAuthentications=publickey",
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-o", "ConnectTimeout=10",
@@ -278,12 +283,13 @@ class AgentFileCopyService:
                 destination_path,
             ]
 
-            log(f"Running SCP: {' '.join(cmd)}")
+            log(f"Running SCP for source: {src}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=3600,
+                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "SCP copy failed")
@@ -302,12 +308,13 @@ class AgentFileCopyService:
             capture_output=True,
             text=True,
             timeout=20,
+            creationflags=CREATE_NO_WINDOW,
         )
 
     def _download_recursive(self, sftp: paramiko.SFTPClient, remote_path: str, local_path: str) -> None:
-        
         attrs = sftp.stat(remote_path)
         log(f"Copying: {local_path} from {remote_path} (size: {attrs.st_size}, mode: {oct(attrs.st_mode)})")
+
         if statmod.S_ISDIR(attrs.st_mode):
             os.makedirs(local_path, exist_ok=True)
             for entry in sftp.listdir_attr(remote_path):
