@@ -1,6 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from core.config_manager import load_all_config, build_vlan_to_env_map, get_env_names, get_env_state_by_name, get_single_section
+from core.config_manager import (
+    load_all_config,
+    build_vlan_to_env_map,
+    get_env_names,
+    get_env_state_by_name,
+    get_single_section,
+    get_env_by_name,
+)
+from services.kms_service import AgentKmsService
 from services.datalink_logic_service import (
     get_env_vlans_str_by_state,
     generate_vlan_config_dl_switch_between_envs,
@@ -104,7 +112,7 @@ class AgentDataLinkService:
                     "health": health,
                 }
             )
-
+        rows = self._merge_kms_routed_rows_into_datalink_rows(rows)
         if rows:
             return rows
 
@@ -112,13 +120,27 @@ class AgentDataLinkService:
 
     def get_options(self):
         rows = self.get_rows()
-        _, _, _, _, env_state ,_ ,_= load_all_config()
+        _, _, _, _, env_state, _, _ = load_all_config()
+
         envs = get_env_names(env_state)
         state_map = {env: get_env_state_by_name(env_state, env) for env in envs}
+
+        transport_by_env = {}
+        for env in env_state:
+            env_name = env.get("env_name", "")
+            if not env_name or env_name == "default":
+                continue
+
+            transport_by_env[env_name] = {
+                "dl_transport": env.get("dl_transport", "datalink"),
+                "kms_station_target": env.get("kms_station_target", ""),
+            }
+
         return {
             "planes": [row["description"] for row in rows],
             "envs": envs,
             "states_by_env": state_map,
+            "transport_by_env": transport_by_env,
         }
 
     def get_maintenance_by_plane(self, plane_description: str) -> str:
@@ -211,6 +233,28 @@ class AgentDataLinkService:
         return rows
 
     def connect_env(self, plane_description: str, env_name: str, state_name: str):
+        all_cfg = load_all_config()
+        env_state = all_cfg[4]
+        env_cfg = get_env_by_name(env_state, env_name)
+
+        if env_cfg and env_cfg.get("dl_transport") == "kms_switch":
+            return self._connect_datalink_via_kms_switch(
+                plane_description=plane_description,
+                env_name=env_name,
+                state_name=state_name,
+                env_cfg=env_cfg,
+            )
+
+        try:
+            self._release_kms_routed_env_if_needed(
+                plane_description=plane_description,
+                target_env_name=env_name,
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "message": str(exc),
+            }
         ate_switches, dl_info, env_state, _, interface_desc_map, _ = self._get_runtime()
 
         if not interface_desc_map:
@@ -306,6 +350,321 @@ class AgentDataLinkService:
             "message": f"Connected {plane_description} to {env_name} with {state_name}",
             "results": results,
         }
+
+    def _get_kms_target_for_state(self, env_cfg: dict, state_name: str) -> str:
+        clean_state = state_name.replace("state_", "").strip()
+
+        return (
+                env_cfg.get(f"kms_station_target_{clean_state}")
+                or env_cfg.get("kms_station_target")
+                or ""
+        )
+
+    def _get_kms_routed_vlan_map(self, kms_stations: list[dict], env_state: list[dict]) -> dict[str, dict]:
+        station_by_name = {
+            station.get("name"): station
+            for station in kms_stations
+            if station.get("name")
+        }
+
+        routed_by_vlan = {}
+
+        for env in env_state:
+            if env.get("dl_transport") != "kms_switch":
+                continue
+
+            env_name = env.get("env_name", "")
+            target_station_name = env.get("kms_station_target", "")
+            target_station = station_by_name.get(target_station_name)
+
+            if not target_station:
+                continue
+
+            vlan = str(target_station.get("vlan", "")).strip()
+            if not vlan:
+                continue
+
+            routed_by_vlan[vlan] = {
+                "env_name": env_name,
+                "target_station": target_station_name,
+                "allow_multi_connect": target_station.get("allow_multi_connect", False),
+            }
+
+        return routed_by_vlan
+
+    def _connect_datalink_via_kms_switch(
+            self,
+            plane_description: str,
+            env_name: str,
+            state_name: str,
+            env_cfg: dict,
+    ):
+        all_cfg = load_all_config()
+        kms_switch = all_cfg[1]
+        kms_stations = all_cfg[3]
+
+        kms_info = get_single_section(kms_switch, "KMS_SWITCH")
+        if not kms_info:
+            return {"success": False, "message": "KMS switch is not configured"}
+
+        target_station = self._get_kms_target_for_state(env_cfg, state_name)
+        if not target_station:
+            return {
+                "success": False,
+                "message": f"No KMS target configured for {env_name}",
+            }
+
+        station_by_name = {
+            station.get("name"): station
+            for station in kms_stations
+            if station.get("name")
+        }
+
+        target_station_cfg = station_by_name.get(target_station)
+        if not target_station_cfg:
+            return {
+                "success": False,
+                "message": f"KMS target {target_station} not found in config",
+            }
+
+        target_vlan = str(target_station_cfg.get("vlan", "")).strip()
+        if not target_vlan:
+            return {
+                "success": False,
+                "message": f"KMS target {target_station} has no VLAN configured",
+            }
+
+        kms_info_runtime, int_kms_dec, _, _, rows = AgentKmsService()._get_runtime()
+
+        interface = get_port_by_desc(int_kms_dec, plane_description)
+        if not interface:
+            return {
+                "success": False,
+                "message": f"Plane {plane_description} not found on KMS switch",
+            }
+
+        current_row = next(
+            (row for row in rows if row.get("description") == plane_description),
+            None,
+        )
+
+        if not current_row:
+            return {
+                "success": False,
+                "message": f"Plane {plane_description} was not found in KMS rows",
+            }
+
+        current_vlan = str(current_row.get("vlan", "")).strip()
+        current_station = str(current_row.get("station_name", "")).strip()
+
+        if current_vlan == target_vlan:
+            return {
+                "success": True,
+                "message": f"{plane_description} is already connected to {env_name}",
+                "details": {
+                    "transport": "kms_switch",
+                    "interface": interface,
+                    "vlan": target_vlan,
+                    "already_connected": True,
+                },
+            }
+
+        if current_vlan != "999":
+            return {
+                "success": False,
+                "message": (
+                    f"{plane_description} is already connected to "
+                    f"{current_station} on VLAN {current_vlan}. "
+                    f"Disconnect first before connecting to {env_name}."
+                ),
+                "details": {
+                    "transport": "kms_switch",
+                    "interface": interface,
+                    "current_vlan": current_vlan,
+                    "current_station": current_station,
+                    "target_vlan": target_vlan,
+                    "target_env": env_name,
+                },
+            }
+
+        commands = [
+            "enable",
+            "configure terminal",
+            f"interface range {interface}",
+            "switchport mode access",
+            f"switchport access vlan {target_vlan}",
+            "no shutdown",
+            "exit",
+            "exit",
+            "write memory",
+            "exit",
+        ]
+
+        output, error = run_ios_commands(
+            kms_info_runtime["hostname"],
+            kms_info_runtime["username"],
+            kms_info_runtime["password"],
+            commands,
+        )
+
+        if error:
+            return {
+                "success": False,
+                "message": error,
+                "details": {"output": output},
+            }
+
+        return {
+            "success": True,
+            "message": f"{plane_description} connected to {env_name} through KMS switch",
+            "details": {
+                "transport": "kms_switch",
+                "interface": interface,
+                "target_station": target_station,
+                "vlan": target_vlan,
+                "output": output,
+            },
+        }
+
+    def _release_kms_routed_env_if_needed(
+            self,
+            plane_description: str,
+            target_env_name: str,
+    ) -> None:
+        all_cfg = load_all_config()
+        kms_switch = all_cfg[1]
+        kms_stations = all_cfg[3]
+        env_state = all_cfg[4]
+
+        target_env_cfg = get_env_by_name(env_state, target_env_name)
+        if target_env_cfg and target_env_cfg.get("dl_transport") == "kms_switch":
+            return
+
+        kms_info = get_single_section(kms_switch, "KMS_SWITCH")
+        if not kms_info:
+            return
+
+        routed_by_vlan = self._get_kms_routed_vlan_map(kms_stations, env_state)
+        if not routed_by_vlan:
+            return
+
+        kms_info_runtime, int_kms_dec, _, _, rows = AgentKmsService()._get_runtime()
+
+        interface = get_port_by_desc(int_kms_dec, plane_description)
+        if not interface:
+            return
+
+        current_row = next(
+            (row for row in rows if row.get("description") == plane_description),
+            None,
+        )
+
+        if not current_row:
+            return
+
+        current_vlan = str(current_row.get("vlan", "")).strip()
+
+        if current_vlan not in routed_by_vlan:
+            return
+
+        routed_env_name = routed_by_vlan[current_vlan].get("env_name", current_vlan)
+
+        commands = [
+            "enable",
+            "configure terminal",
+            f"interface range {interface}",
+            "switchport mode access",
+            "switchport access vlan 999",
+            "shutdown",
+            "exit",
+            "exit",
+            "write memory",
+            "exit",
+        ]
+
+        output, error = run_ios_commands(
+            kms_info_runtime["hostname"],
+            kms_info_runtime["username"],
+            kms_info_runtime["password"],
+            commands,
+        )
+
+        if error:
+            raise RuntimeError(
+                f"Failed to release {routed_env_name} from KMS switch: {error}"
+            )
+
+    def _get_kms_routed_datalink_status_rows(self) -> list[dict]:
+        all_cfg = load_all_config()
+        kms_switch = all_cfg[1]
+        kms_stations = all_cfg[3]
+        env_state = all_cfg[4]
+
+        kms_info = get_single_section(kms_switch, "KMS_SWITCH")
+        if not kms_info:
+            return []
+
+        routed_by_vlan = self._get_kms_routed_vlan_map(kms_stations, env_state)
+        if not routed_by_vlan:
+            return []
+
+        _, _, _, _, kms_rows = AgentKmsService()._get_runtime()
+
+        result = []
+
+        for row in kms_rows:
+            vlan = str(row.get("vlan", "")).strip()
+
+            if vlan not in routed_by_vlan:
+                continue
+
+            routed = routed_by_vlan[vlan]
+
+            result.append(
+                {
+                    "interface": row.get("interface", ""),
+                    "description": row.get("description", ""),
+                    "vlan": vlan,
+                    "env_name": routed.get("env_name", "rflt"),
+                    "target_station": routed.get("target_station", ""),
+                }
+            )
+
+        return result
+
+    def _merge_kms_routed_rows_into_datalink_rows(self, rows: list[dict]) -> list[dict]:
+        kms_routed_rows = self._get_kms_routed_datalink_status_rows()
+
+        if not kms_routed_rows:
+            return rows
+
+        existing_descriptions = {row["description"] for row in rows}
+
+        for routed in kms_routed_rows:
+            if routed["description"] in existing_descriptions:
+                for row in rows:
+                    if row["description"] == routed["description"]:
+                        row["interface"] = f"KMS:{routed['interface']}"
+                        row["vlans"] = [routed["vlan"]]
+                        row["environment"] = routed["env_name"]
+                        row["maintenance"] = "via KMS switch"
+                        row["ate_state"] = "state_default"
+                        row["health"] = "healthy"
+                        break
+            else:
+                rows.append(
+                    {
+                        "interface": f"KMS:{routed['interface']}",
+                        "description": routed["description"],
+                        "vlans": [routed["vlan"]],
+                        "environment": routed["env_name"],
+                        "maintenance": "via KMS switch",
+                        "ate_state": "state_default",
+                        "health": "healthy",
+                    }
+                )
+
+        return rows
 
     def _run_interface_commands(self, hostname: str, username: str, password: str, interface: str, commands: list[str]):
         command_seq = [

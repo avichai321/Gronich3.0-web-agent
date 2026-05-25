@@ -1,4 +1,4 @@
-from core.config_manager import load_all_config, build_vlan_to_kms_map, get_single_section ,get_local_kms_station_name , get_kms_station_by_name
+from core.config_manager import load_all_config, build_vlan_to_kms_map, get_single_section ,get_local_kms_station_name , get_kms_station_by_name, load_kms_stations
 from services.helpers_service import get_port_by_desc
 from services.parsing_service import parse_show_interfaces_status
 from services.ssh_service import SSHService, run_ios_commands
@@ -75,24 +75,42 @@ class AgentKmsService:
             return rows
         return self._build_dry_run_rows_from_config()
 
-    
-
     def get_options(self):
         _, _, _, vlan_to_station, rows = self._get_runtime()
         local_station_name = get_local_kms_station_name()
+        selectable_station_names = self._get_selectable_station_names()
 
         if rows:
             planes = [row["description"] for row in rows]
 
             # Agent should only expose its own KMS station
             if local_station_name:
+                local_cfg = self._get_kms_station_config_by_name(local_station_name)
+
+                if local_cfg.get("service_only", False):
+                    return {
+                        "planes": planes,
+                        "stations": [],
+                    }
+
                 return {
                     "planes": planes,
                     "stations": [local_station_name],
                 }
 
-            used_vlans = {row["vlan"] for row in rows if row["status"] == "connected"}
-            free_stations = [name for vlan, name in vlan_to_station.items() if vlan not in used_vlans]
+            used_vlans = {
+                str(row["vlan"]).strip()
+                for row in rows
+                if row["status"] == "connected"
+            }
+
+            free_stations = [
+                name
+                for vlan, name in vlan_to_station.items()
+                if str(vlan).strip() not in used_vlans
+                   and name in selectable_station_names
+            ]
+
             return {
                 "planes": planes,
                 "stations": sorted(free_stations),
@@ -101,29 +119,61 @@ class AgentKmsService:
         dry_rows = self._build_dry_run_rows_from_config()
 
         if local_station_name:
+            local_cfg = self._get_kms_station_config_by_name(local_station_name)
+
+            if local_cfg.get("service_only", False):
+                return {
+                    "planes": [row["description"] for row in dry_rows],
+                    "stations": [],
+                }
+
             return {
                 "planes": [row["description"] for row in dry_rows],
                 "stations": [local_station_name],
             }
 
+        dry_stations = [
+            name
+            for name in vlan_to_station.values()
+            if name in selectable_station_names
+        ]
+
         return {
             "planes": [row["description"] for row in dry_rows],
-            "stations": sorted(list(vlan_to_station.values())),
+            "stations": sorted(dry_stations),
         }
 
     def connect_station(self, plane_description: str, station_name: str):
         local_station_name = get_local_kms_station_name()
         if local_station_name:
             station_name = local_station_name
+
+        target_station_cfg = self._get_kms_station_config_by_name(station_name)
+
+        if target_station_cfg.get("service_only", False):
+            return {
+                "success": False,
+                "message": (
+                    f"{station_name} is managed through Data-Link "
+                    f"and cannot be connected from KMS screen"
+                ),
+            }
+
         kms_info, int_kms_dec, _, vlan_to_station, rows = self._get_runtime()
 
         if not rows:
             dry_rows = self._build_dry_run_rows_from_config()
             plane_names = [row["description"] for row in dry_rows]
-            station_names = list(vlan_to_station.values())
+
+            station_names = [
+                name
+                for name in vlan_to_station.values()
+                if name in self._get_selectable_station_names()
+            ]
 
             if plane_description not in plane_names:
                 return {"success": False, "message": f"Plane {plane_description} not found"}
+
             if station_name not in station_names:
                 return {"success": False, "message": f"Station {station_name} not found"}
 
@@ -137,19 +187,34 @@ class AgentKmsService:
 
         if not interface:
             return {"success": False, "message": f"Plane {plane_description} not found"}
+
         if not target_vlan:
             return {"success": False, "message": f"Station {station_name} not found"}
 
         for row in rows:
             if row["station_name"] == station_name and row["status"] == "connected":
-                return {"success": False, "message": f"{station_name} already in use"}
+                return {
+                    "success": False,
+                    "message": f"{station_name} already in use",
+                }
 
         current_row = next((row for row in rows if row["description"] == plane_description), None)
-        if not current_row:
-            return {"success": False, "message": f"Plane {plane_description} not found in current KMS rows"}
 
-        if current_row["vlan"] != "999":
-            return {"success": False, "message": f"{plane_description} already in use"}
+        if not current_row:
+            return {
+                "success": False,
+                "message": f"Plane {plane_description} not found in current KMS rows",
+            }
+
+        if str(current_row["vlan"]).strip() != "999":
+            return {
+                "success": False,
+                "message": (
+                    f"{plane_description} is already connected to "
+                    f"{current_row['station_name']} on VLAN {current_row['vlan']}. "
+                    f"Disconnect first."
+                ),
+            }
 
         commands = [
             "enable",
@@ -198,15 +263,35 @@ class AgentKmsService:
             }
 
         interface = get_port_by_desc(int_kms_dec, plane_description)
+
         if not interface:
             return {"success": False, "message": f"Plane {plane_description} not found"}
 
         current_row = next((row for row in rows if row["description"] == plane_description), None)
+
         if not current_row:
-            return {"success": False, "message": f"Plane {plane_description} not found in current KMS rows"}
+            return {
+                "success": False,
+                "message": f"Plane {plane_description} not found in current KMS rows",
+            }
 
         if current_row["status"] != "connected":
-            return {"success": False, "message": f"{plane_description} is already free"}
+            return {
+                "success": False,
+                "message": f"{plane_description} is already free",
+            }
+
+        current_station_cfg = self._get_kms_station_config_by_name(current_row["station_name"])
+
+        if current_station_cfg.get("service_only", False):
+            return {
+                "success": False,
+                "message": (
+                    f"{plane_description} is connected to {current_row['station_name']}. "
+                    f"This service is managed through Data-Link. "
+                    f"Move the plane to another Data-Link environment to release it."
+                ),
+            }
 
         commands = [
             "enable",
@@ -236,4 +321,22 @@ class AgentKmsService:
             "message": f"Disconnected service from {plane_description}",
             "interface": interface,
             "output": output,
+        }
+
+    def _get_kms_station_config_by_name(self, station_name: str) -> dict:
+        _, _, _, kms_stations, *_ = load_all_config()
+
+        for station in kms_stations:
+            if station.get("name") == station_name:
+                return station
+
+        return {}
+
+    def _get_selectable_station_names(self) -> set[str]:
+        _, _, _, kms_stations, *_ = load_all_config()
+
+        return {
+            station.get("name", "")
+            for station in kms_stations
+            if station.get("name") and not station.get("service_only", False)
         }

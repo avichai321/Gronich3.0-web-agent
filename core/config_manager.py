@@ -88,6 +88,8 @@ def load_kms_stations() -> list[dict]:
                     "username": config[section].get("username", ""),
                     "password": config[section].get("password", ""),
                     "copy_root": config[section].get("copy_root", r"C:\Temp\copy_jobs"),
+                    "service_only": config[section].getboolean("service_only", fallback=False),
+                    "allow_multi_connect": config[section].getboolean("allow_multi_connect", fallback=False)
                 }
             )
 
@@ -273,3 +275,9 @@ def get_env_state_by_name(env_state: list[dict], name: str) -> list[str]:
 def get_local_kms_station_name() -> str:
     config = load_agent_config()
     return config.get("server", "agent_id", fallback="").strip()
+
+def get_env_by_name(env_state: list[dict], env_name: str) -> dict | None:
+    for env in env_state:
+        if env.get("env_name") == env_name:
+            return env
+    return None

@@ -14,6 +14,7 @@ class DataLinkPage(QWidget):
         super().__init__()
         self.service = AgentDataLinkService()
         self.current_options = {}
+        self.current_rows = []
         self._busy = False
         self._action_busy = False
 
@@ -50,6 +51,11 @@ class DataLinkPage(QWidget):
 
         left.addWidget(QLabel("ATE Desired State"))
         left.addWidget(self.state_box)
+
+        self.transport_label = QLabel("")
+        self.transport_label.setObjectName("MutedText")
+        self.transport_label.setWordWrap(True)
+        left.addWidget(self.transport_label)
 
         self.execute_btn = QPushButton("Execute")
         self.execute_btn.setObjectName("PrimaryButton")
@@ -108,6 +114,7 @@ class DataLinkPage(QWidget):
         rows = payload.get("rows", [])
         opts = payload.get("options", {})
         self.current_options = opts
+        self.current_rows = rows
 
         self.table.setRowCount(0)
         self.plane_box.clear()
@@ -149,6 +156,7 @@ class DataLinkPage(QWidget):
                 self.table.setItem(i, col, item)
 
         self.table.resizeColumnsToContents()
+        self.handle_env_change(self.env_box.currentText().strip())
 
     def _on_load_error(self, message: str):
         self._busy = False
@@ -157,7 +165,20 @@ class DataLinkPage(QWidget):
 
     def handle_env_change(self, env_name: str):
         self.state_box.clear()
-        self.state_box.addItems(self.current_options.get("states_by_env", {}).get(env_name, []))
+        self.state_box.addItems(
+            self.current_options.get("states_by_env", {}).get(env_name, [])
+        )
+
+        transport = self.current_options.get("transport_by_env", {}).get(env_name, {})
+
+        if transport.get("dl_transport") == "kms_switch":
+            self.transport_label.setText(
+                f"Notice: {env_name} is routed through the KMS switch. "
+                f"This action is managed from Data-Link, but the physical connection "
+                f"will be applied on the KMS infrastructure."
+            )
+        else:
+            self.transport_label.setText("")
 
     def handle_execute(self):
         if self._action_busy:
@@ -166,6 +187,36 @@ class DataLinkPage(QWidget):
         plane = self.plane_box.currentText().strip()
         env_name = self.env_box.currentText().strip()
         state_name = self.state_box.currentText().strip()
+
+        transport = self.current_options.get("transport_by_env", {}).get(env_name, {})
+
+        if transport.get("dl_transport") == "kms_switch":
+            QMessageBox.information(
+                self,
+                "Data-Link via KMS",
+                (
+                    f"The selected environment '{env_name}' is routed through the KMS switch.\n\n"
+                    "The operation will be executed from the Data-Link screen, "
+                    "but the physical port change will be applied on the KMS switch."
+                ),
+            )
+        else:
+            current_row = next(
+                (row for row in self.current_rows if row.get("description") == plane),
+                None,
+            )
+
+            if current_row and current_row.get("maintenance") == "via KMS switch":
+                QMessageBox.information(
+                    self,
+                    "Releasing KMS-routed service",
+                    (
+                        f"{plane} is currently connected through a KMS-routed service "
+                        f"({current_row.get('environment')}).\n\n"
+                        "The system will first release the KMS-side connection, "
+                        "then continue with the selected Data-Link environment."
+                    ),
+                )
 
         self._action_busy = True
         self.set_controls_enabled(False)
