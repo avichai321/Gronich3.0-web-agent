@@ -392,6 +392,43 @@ class AgentDataLinkService:
 
         return routed_by_vlan
 
+    def _normalize_plane_name(self, value: str) -> str:
+        clean = str(value or "").strip()
+
+        if clean.upper().startswith("DL_"):
+            return clean[3:].strip()
+
+        return clean
+
+    def _ensure_dl_prefix(self, value: str) -> str:
+        clean = str(value or "").strip()
+
+        if not clean:
+            return clean
+
+        if clean.upper().startswith("DL_"):
+            return clean
+
+        return f"DL_{clean}"
+
+    def _get_kms_port_by_plane(self, int_kms_dec: dict, plane_description: str) -> str:
+        target = self._normalize_plane_name(plane_description)
+
+        for interface, description in int_kms_dec.items():
+            if self._normalize_plane_name(description) == target:
+                return interface
+
+        return ""
+
+    def _get_kms_row_by_plane(self, rows: list[dict], plane_description: str) -> dict | None:
+        target = self._normalize_plane_name(plane_description)
+
+        for row in rows:
+            if self._normalize_plane_name(row.get("description", "")) == target:
+                return row
+
+        return None
+
     def _connect_datalink_via_kms_switch(
             self,
             plane_description: str,
@@ -436,17 +473,14 @@ class AgentDataLinkService:
 
         kms_info_runtime, int_kms_dec, _, _, rows = AgentKmsService()._get_runtime()
 
-        interface = get_port_by_desc(int_kms_dec, plane_description)
+        interface = self._get_kms_port_by_plane(int_kms_dec, plane_description)
         if not interface:
             return {
                 "success": False,
                 "message": f"Plane {plane_description} not found on KMS switch",
             }
 
-        current_row = next(
-            (row for row in rows if row.get("description") == plane_description),
-            None,
-        )
+        current_row = self._get_kms_row_by_plane(rows, plane_description)
 
         if not current_row:
             return {
@@ -550,14 +584,11 @@ class AgentDataLinkService:
 
         kms_info_runtime, int_kms_dec, _, _, rows = AgentKmsService()._get_runtime()
 
-        interface = get_port_by_desc(int_kms_dec, plane_description)
+        interface = self._get_kms_port_by_plane(int_kms_dec, plane_description)
         if not interface:
             return
 
-        current_row = next(
-            (row for row in rows if row.get("description") == plane_description),
-            None,
-        )
+        current_row = self._get_kms_row_by_plane(rows, plane_description)
 
         if not current_row:
             return
@@ -623,9 +654,9 @@ class AgentDataLinkService:
             result.append(
                 {
                     "interface": row.get("interface", ""),
-                    "description": row.get("description", ""),
+                    "description": self._ensure_dl_prefix(row.get("description", "")),
                     "vlan": vlan,
-                    "env_name": routed.get("env_name", "rflt"),
+                    "env_name": routed.get("env_name", "special_env"),
                     "target_station": routed.get("target_station", ""),
                 }
             )
@@ -638,24 +669,28 @@ class AgentDataLinkService:
         if not kms_routed_rows:
             return rows
 
-        existing_descriptions = {row["description"] for row in rows}
+        existing_by_normalized = {
+            self._normalize_plane_name(row.get("description", "")): row
+            for row in rows
+        }
 
         for routed in kms_routed_rows:
-            if routed["description"] in existing_descriptions:
-                for row in rows:
-                    if row["description"] == routed["description"]:
-                        row["interface"] = f"KMS:{routed['interface']}"
-                        row["vlans"] = [routed["vlan"]]
-                        row["environment"] = routed["env_name"]
-                        row["maintenance"] = "via KMS switch"
-                        row["ate_state"] = "state_default"
-                        row["health"] = "healthy"
-                        break
+            routed_key = self._normalize_plane_name(routed.get("description", ""))
+
+            existing_row = existing_by_normalized.get(routed_key)
+
+            if existing_row:
+                existing_row["interface"] = f"KMS:{routed['interface']}"
+                existing_row["vlans"] = [routed["vlan"]]
+                existing_row["environment"] = routed["env_name"]
+                existing_row["maintenance"] = "via KMS switch"
+                existing_row["ate_state"] = "state_default"
+                existing_row["health"] = "healthy"
             else:
                 rows.append(
                     {
                         "interface": f"KMS:{routed['interface']}",
-                        "description": routed["description"],
+                        "description": self._ensure_dl_prefix(routed["description"]),
                         "vlans": [routed["vlan"]],
                         "environment": routed["env_name"],
                         "maintenance": "via KMS switch",
